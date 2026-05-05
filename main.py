@@ -1100,6 +1100,11 @@ def run():
                      c["symbol"], c["score"], entry, shares, cost, cash)
             if tracker.open(c, cash):
                 opened += 1
+                # Immediately refresh cash after each trade
+                cash, _ = tlog.cash_invested()
+                if cash < 100:
+                    log.info("Account fully deployed - stopping new positions")
+                    break
 
         if opened == 0:
             print("  No new positions opened this scan")
