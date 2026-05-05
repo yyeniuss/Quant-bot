@@ -1070,17 +1070,25 @@ def run():
 
         opened = 0
         for c in buys:
+            # Skip if already have this position
             if c["symbol"] in tracker.pos:
                 continue
+            # Get fresh cash balance
             cash, _ = tlog.cash_invested()
-            if cash < 100:
+            # Stop if broke
+            if cash < 50:
+                log.info("OUT OF CASH - stopping new positions")
                 break
-            if c["cost"] > cash:
-                c["shares"] = max(1, int(cash * 0.9 / max(c["entry"], 0.0001)))
-                c["cost"]   = round(c["shares"] * c["entry"], 2)
-                c["alloc"]  = round(c["cost"] / ACCOUNT_SIZE * 100, 1)
-            if c["cost"] <= 0 or c["shares"] <= 0:
-                continue
+            # Force resize to fit cash - never skip due to size
+            entry = max(float(c.get("entry", 1)), 0.0001)
+            max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
+            shares = max(1, int(max_spend / entry))
+            cost   = round(shares * entry, 2)
+            c["shares"] = shares
+            c["cost"]   = cost
+            c["alloc"]  = round(cost / ACCOUNT_SIZE * 100, 1)
+            log.info("OPENING %s score=%.1f entry=$%.4f shares=%d cost=$%.2f cash=$%.2f",
+                     c["symbol"], c["score"], entry, shares, cost, cash)
             if tracker.open(c, cash):
                 opened += 1
 
