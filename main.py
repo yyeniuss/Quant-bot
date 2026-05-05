@@ -554,11 +554,15 @@ class Tracker:
 
     def open(self, r, cash):
         sym  = r["symbol"]
+        # Force resize if cost exceeds cash
+        entry = max(float(r.get("entry", 1)), 0.0001)
+        if float(r.get("cost", 0)) > cash:
+            r["shares"] = max(1, int(cash * 0.9 / entry))
+            r["cost"]   = round(r["shares"] * entry, 2)
+            r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
         cost = r["cost"]
-        if cost > cash:
-            log.info("SKIP %s need $%.2f only $%.2f avail", sym, cost, cash)
-            return False
-        if cost <= 0 or r["shares"] <= 0:
+        if cost <= 0 or r["shares"] <= 0 or cash < 10:
+            log.info("SKIP %s - cost=$%.2f shares=%s cash=$%.2f", sym, cost, r["shares"], cash)
             return False
         self.pos[sym] = r
         STATE["positions"] = self.pos
