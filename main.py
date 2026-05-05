@@ -1070,19 +1070,16 @@ def run():
 
         opened = 0
         for c in buys:
-            if not tracker.can_open():
-                break
             if c["symbol"] in tracker.pos:
                 continue
             cash, _ = tlog.cash_invested()
-            if c["cost"] > cash and cash < c["cost"]:
-                log.info("SKIP %s -- need $%.2f only $%.2f avail", c["symbol"], c["cost"], cash)
-                continue
-            if c["cost"] <= 0:
-                continue
-            if c["cost"] > ACCOUNT_SIZE * 0.10:  # max 10% per trade
-                continue
-            if c["cost"] <= 0:
+            if cash < 100:
+                break
+            if c["cost"] > cash:
+                c["shares"] = max(1, int(cash * 0.9 / max(c["entry"], 0.0001)))
+                c["cost"]   = round(c["shares"] * c["entry"], 2)
+                c["alloc"]  = round(c["cost"] / ACCOUNT_SIZE * 100, 1)
+            if c["cost"] <= 0 or c["shares"] <= 0:
                 continue
             if tracker.open(c, cash):
                 opened += 1
