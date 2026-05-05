@@ -25,7 +25,7 @@ BASE_DIR      = os.path.expanduser("~/trading_bot")
 LOG_FILE      = BASE_DIR + "/trades.csv"
 PERF_FILE     = BASE_DIR + "/performance.json"
 BOT_LOG       = BASE_DIR + "/bot.log"
-PORT          = 8888
+PORT          = int(os.getenv("PORT", 8888))
 os.makedirs(BASE_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -950,7 +950,7 @@ class DashHandler(BaseHTTPRequestHandler):
 
 
 def run_dashboard():
-    HTTPServer(("localhost", PORT), DashHandler).serve_forever()
+    HTTPServer(("0.0.0.0", PORT), DashHandler).serve_forever()
 
 
 # ─────────────────────────────────────────────────────────────
