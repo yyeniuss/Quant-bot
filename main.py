@@ -416,6 +416,11 @@ def calc_size(entry, stop, cash):
         return 0, 0, 0
     sh   = int((ACCOUNT_SIZE * MAX_RISK_PCT) / r)
     cost = round(sh * entry, 2)
+    # Hard cap: never more than 10% of account per position
+    max_cost = ACCOUNT_SIZE * 0.10
+    if cost > max_cost:
+        sh   = int(max_cost / entry)
+        cost = round(sh * entry, 2)
     if cost > cash:
         sh   = int(cash / entry)
         cost = round(sh * entry, 2)
@@ -1075,7 +1080,7 @@ def run():
                 continue
             if c["cost"] <= 0:
                 continue
-            if c["cost"] > ACCOUNT_SIZE * 0.15:  # max 15% per trade
+            if c["cost"] > ACCOUNT_SIZE * 0.10:  # max 10% per trade
                 continue
             if c["cost"] <= 0:
                 continue
