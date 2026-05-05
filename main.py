@@ -1073,9 +1073,14 @@ def run():
                 r["score"], r["style"], r["m5"], r["rsi"], flag))
 
         opened = 0
+        log.info("BUY SIGNALS FOUND: %d | Cash: $%.2f | Positions: %d",
+                 len(buys), cash, len(tracker.pos))
         for c in buys:
+            log.info("EVALUATING: %s score=%.1f cost=$%.2f entry=$%.4f shares=%d",
+                     c["symbol"], c["score"], c["cost"], c["entry"], c["shares"])
             # Skip if already have this position
             if c["symbol"] in tracker.pos:
+                log.info("SKIP %s - already in position", c["symbol"])
                 continue
             # Get fresh cash balance
             cash, _ = tlog.cash_invested()
