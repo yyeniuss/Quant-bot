@@ -1001,6 +1001,38 @@ class DashHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode())
 
 
+def update_prices_live():
+    import yfinance as yf2
+    import ccxt as ccxt2
+    exch2 = ccxt2.binance({"enableRateLimit": True})
+    while True:
+        try:
+            if STATE["positions"]:
+                syms = list(STATE["positions"].keys())
+                # Update crypto prices
+                crypto_syms = [s for s in syms if "/" in s]
+                for cs in crypto_syms:
+                    try:
+                        ticker = exch2.fetch_ticker(cs)
+                        STATE["current_prices"][cs] = float(ticker["last"])
+                    except: pass
+                # Update stock prices
+                stock_syms = [s for s in syms if "/" not in s]
+                if stock_syms:
+                    tickers_str = " ".join(stock_syms)
+                    data = yf2.download(tickers_str, period="1d", interval="1m",
+                                        progress=False, auto_adjust=True)
+                    for sym2 in stock_syms:
+                        try:
+                            if len(stock_syms) == 1:
+                                price = float(data["Close"].dropna().iloc[-1])
+                            else:
+                                price = float(data["Close"][sym2].dropna().iloc[-1])
+                            STATE["current_prices"][sym2] = price
+                        except: pass
+        except: pass
+        time.sleep(10)
+
 def run_dashboard():
     HTTPServer(("0.0.0.0", PORT), DashHandler).serve_forever()
 
@@ -1016,6 +1048,7 @@ def run():
     exch    = ccxt.binance({"enableRateLimit": True})
 
     threading.Thread(target=run_dashboard, daemon=True).start()
+    threading.Thread(target=update_prices_live, daemon=True).start()
     tlog.sync()
     STATE["weights"] = learner.w
 
