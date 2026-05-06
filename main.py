@@ -16,8 +16,8 @@ ACCOUNT_SIZE  = 50000
 MAX_RISK_PCT  = 0.01
 MAX_POSITIONS = 9999
 SCAN_INTERVAL  = 60
-TAKE_PROFIT_QUICK = 0.05   # quick flip target +5%
-TAKE_PROFIT_LONG  = 0.15   # long swing target +15%
+TAKE_PROFIT_QUICK = 0.01   # quick flip target +1%
+TAKE_PROFIT_LONG  = 0.05   # swing target +5%
 STOP_LOSS_PCT     = 0.025  # stop loss -2.5%
 TAKE_PROFIT_1     = 0.05   # alias
 TAKE_PROFIT_2     = 0.08   # alias
@@ -693,10 +693,10 @@ class Tracker:
             hit = None
             if loss_pct >= 2.5:
                 hit = "STOP-LOSS -2.5%"
-            elif gain_pct >= 15.0:
-                hit = "TARGET +15% SWING HIT"
             elif gain_pct >= 5.0:
-                hit = "TARGET +5% QUICK HIT"
+                hit = "TARGET +5% SWING HIT"
+            elif gain_pct >= 1.0:
+                hit = "TARGET +1% QUICK HIT"
             if hit:
                 pnl = self.log.close(sym, cur)
                 learner.update(sym, pos.get("factors", []), pnl)
