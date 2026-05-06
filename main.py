@@ -416,11 +416,6 @@ def calc_size(entry, stop, cash):
         return 0, 0, 0
     sh   = int((ACCOUNT_SIZE * MAX_RISK_PCT) / r)
     cost = round(sh * entry, 2)
-    # Hard cap: never more than 10% of account per position
-    max_cost = ACCOUNT_SIZE * 0.10
-    if cost > max_cost:
-        sh   = int(max_cost / entry)
-        cost = round(sh * entry, 2)
     if cost > cash:
         sh   = int(cash / entry)
         cost = round(sh * entry, 2)
@@ -554,15 +549,11 @@ class Tracker:
 
     def open(self, r, cash):
         sym  = r["symbol"]
-        # Force resize if cost exceeds cash
-        entry = max(float(r.get("entry", 1)), 0.0001)
-        if float(r.get("cost", 0)) > cash:
-            r["shares"] = max(1, int(cash * 0.9 / entry))
-            r["cost"]   = round(r["shares"] * entry, 2)
-            r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
         cost = r["cost"]
-        if cost <= 0 or r["shares"] <= 0 or cash < 10:
-            log.info("SKIP %s - cost=$%.2f shares=%s cash=$%.2f", sym, cost, r["shares"], cash)
+        if cost > cash:
+            log.info("SKIP %s need $%.2f only $%.2f avail", sym, cost, cash)
+            return False
+        if cost <= 0 or r["shares"] <= 0:
             return False
         self.pos[sym] = r
         STATE["positions"] = self.pos
@@ -819,7 +810,7 @@ h1{font-size:22px;font-weight:500;color:#fff;margin-bottom:3px}
 h2{font-size:10px;font-weight:600;margin:22px 0 10px;color:#444;text-transform:uppercase;letter-spacing:.1em}
 .sub{font-size:11px;color:#333;margin-bottom:20px}
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
-.g6{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}
+.g6{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}.g6 .span2{grid-column:span 2}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:22px}
 .card{background:#111;border:0.5px solid #1c1c1c;border-radius:10px;padding:15px 17px}
 .hl{border-color:#1D9E75}.dg{border-color:#E24B4A}
@@ -872,21 +863,72 @@ tr:hover td{background:#131313}
     H.append("</div>")
 
     # performance
+    # Calculate live P&L across all open positions
+    cur_prices = s.get("current_prices", {})
+    live_pnl = 0.0
+    for sym2, t2 in pos.items():
+        try:
+            e2   = float(t2.get("entry", 0) or 0)
+            sh2  = float(t2.get("shares", 0) or 0)
+            cp2  = float(cur_prices.get(sym2, e2) or e2)
+            live_pnl += (cp2 - e2) * sh2
+        except: pass
+    live_pnl      = round(live_pnl, 2)
+    live_pnl_pct  = round(live_pnl / ACCOUNT_SIZE * 100, 2)
+    live_pnl_col  = "#1D9E75" if live_pnl >= 0 else "#E24B4A"
+
+    # Build P&L history from closed trades for sparkline
+    try:
+        import pandas as pd2
+        df2 = pd2.read_csv(LOG_FILE)
+        closed2 = df2[df2["status"]=="CLOSED"].copy()
+        closed2["pnl"] = closed2["pnl"].astype(float)
+        cumulative = closed2["pnl"].cumsum().tolist()
+        timestamps = closed2["timestamp"].tolist()
+    except:
+        cumulative = []
+        timestamps = []
+
+    # Build SVG sparkline
+    if len(cumulative) >= 2:
+        mn = min(cumulative); mx = max(cumulative)
+        rng = mx - mn if mx != mn else 1
+        w = 340; h = 80; pad = 10
+        pts = []
+        for i, v in enumerate(cumulative):
+            x = pad + (i / (len(cumulative)-1)) * (w - 2*pad)
+            y = pad + (1 - (v - mn) / rng) * (h - 2*pad)
+            pts.append((x, y))
+        path = "M " + " L ".join(["%.1f %.1f" % (x, y) for x,y in pts])
+        last_val = cumulative[-1]
+        line_col = "#1D9E75" if last_val >= 0 else "#E24B4A"
+        # Fill path
+        fill_path = path + " L %.1f %.1f L %.1f %.1f Z" % (pts[-1][0], h-pad, pts[0][0], h-pad)
+        sparkline = (
+            "<svg viewBox='0 0 %d %d' xmlns='http://www.w3.org/2000/svg' style='width:100%%;height:80px'>" % (w,h) +
+            "<defs><linearGradient id='g1' x1='0' y1='0' x2='0' y2='1'>" +
+            "<stop offset='0%%' stop-color='%s' stop-opacity='0.3'/>" % line_col +
+            "<stop offset='100%%' stop-color='%s' stop-opacity='0.0'/></linearGradient></defs>" % line_col +
+            "<path d='%s' fill='url(#g1)' stroke='none'/>" % fill_path +
+            "<path d='%s' fill='none' stroke='%s' stroke-width='2' stroke-linecap='round'/>" % (path, line_col) +
+            "</svg>"
+        )
+    else:
+        sparkline = "<p style='color:#333;font-size:12px;padding:20px 0'>Chart appears after first closed trade</p>"
+
     H.append("<h2>Performance</h2><div class='g6'>")
-    H.append("<div class='card'><div class='cl'>Closed Trades</div>"
-             "<div class='cv-sm'>%d</div><div class='cv-sub'>%d still open</div></div>" % (
-                 st.get("total", 0), len(pos)))
+    H.append("<div class='card'><div class='cl'>Open Positions</div>"
+             "<div class='cv-sm'>%d</div><div class='cv-sub'>%d closed</div></div>" % (
+                 len(pos), st.get("total", 0)))
     H.append("<div class='card'><div class='cl'>Win Rate</div>"
              "<div class='cv-sm' style='color:%s'>%s%%</div>"
              "<div class='cv-sub'>%dW %dL</div></div>" % (
                  WRC, st.get("win_rate", 0), st.get("wins", 0), st.get("losses", 0)))
-    H.append("<div class='card'><div class='cl'>Realized P&amp;L</div>"
+    H.append("<div class='card'><div class='cl'>Live P&amp;L (open)</div>"
              "<div class='cv-sm' style='color:%s'>$%+.2f</div>"
-             "<div class='cv-sub'>%.2f%%</div></div>" % (gc(pnl), pnl, pnl_p))
-    H.append("<div class='card'><div class='cl'>Best Trade</div>"
-             "<div class='cv-sm' style='color:#1D9E75'>$%+.2f</div></div>" % st.get("best", 0))
-    H.append("<div class='card'><div class='cl'>Worst Trade</div>"
-             "<div class='cv-sm' style='color:#E24B4A'>$%.2f</div></div>" % st.get("worst", 0))
+             "<div class='cv-sub' style='color:%s'>%+.2f%% unrealized</div></div>" % (
+                 live_pnl_col, live_pnl, live_pnl_col, live_pnl_pct))
+    H.append("<div class='card' style='grid-column:span 2'><div class='cl'>Account P&amp;L History</div>" + sparkline + "</div>")
     H.append("<div class='card'><div class='cl'>Avg Win / Loss</div>"
              "<div class='cv-sm' style='color:#1D9E75'>$%.2f</div>"
              "<div class='cv-sub' style='color:#E24B4A'>$%.2f avg loss</div></div>" % (
@@ -1073,38 +1115,23 @@ def run():
                 r["score"], r["style"], r["m5"], r["rsi"], flag))
 
         opened = 0
-        log.info("BUY SIGNALS FOUND: %d | Cash: $%.2f | Positions: %d",
-                 len(buys), cash, len(tracker.pos))
         for c in buys:
-            log.info("EVALUATING: %s score=%.1f cost=$%.2f entry=$%.4f shares=%d",
-                     c["symbol"], c["score"], c["cost"], c["entry"], c["shares"])
-            # Skip if already have this position
-            if c["symbol"] in tracker.pos:
-                log.info("SKIP %s - already in position", c["symbol"])
-                continue
-            # Get fresh cash balance
-            cash, _ = tlog.cash_invested()
-            # Stop if broke
-            if cash < 50:
-                log.info("OUT OF CASH - stopping new positions")
+            if not tracker.can_open():
                 break
-            # Force resize to fit cash - never skip due to size
-            entry = max(float(c.get("entry", 1)), 0.0001)
-            max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
-            shares = max(1, int(max_spend / entry))
-            cost   = round(shares * entry, 2)
-            c["shares"] = shares
-            c["cost"]   = cost
-            c["alloc"]  = round(cost / ACCOUNT_SIZE * 100, 1)
-            log.info("OPENING %s score=%.1f entry=$%.4f shares=%d cost=$%.2f cash=$%.2f",
-                     c["symbol"], c["score"], entry, shares, cost, cash)
+            if c["symbol"] in tracker.pos:
+                continue
+            cash, _ = tlog.cash_invested()
+            if c["cost"] > cash and cash < c["cost"]:
+                log.info("SKIP %s -- need $%.2f only $%.2f avail", c["symbol"], c["cost"], cash)
+                continue
+            if c["cost"] <= 0:
+                continue
+            if c["cost"] > ACCOUNT_SIZE * 0.15:  # max 15% per trade
+                continue
+            if c["cost"] <= 0:
+                continue
             if tracker.open(c, cash):
                 opened += 1
-                # Immediately refresh cash after each trade
-                cash, _ = tlog.cash_invested()
-                if cash < 100:
-                    log.info("Account fully deployed - stopping new positions")
-                    break
 
         if opened == 0:
             print("  No new positions opened this scan")
