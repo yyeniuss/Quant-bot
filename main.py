@@ -1183,40 +1183,29 @@ def update_prices_live():
                         log.error("Crypto price %s: %s", cs, ex)
 
                 # Stocks/Forex/Futures via yfinance fast_info
-                import yfinance as yf3
-                # Batch download all stocks at once - much more efficient
-                if stock_syms:
+                for ss in stock_syms:
                     try:
-                        tickers_str = " ".join(stock_syms)
-                        if len(stock_syms) == 1:
-                            data = yf3.download(stock_syms[0], period="1d",
-                                                interval="1m", progress=False, auto_adjust=True)
-                            if not data.empty:
-                                price = float(data["Close"].dropna().iloc[-1])
-                                if price > 0:
-                                    STATE["current_prices"][stock_syms[0]] = price
-                        else:
-                            data = yf3.download(tickers_str, period="1d",
-                                                interval="1m", progress=False, auto_adjust=True)
-                            if not data.empty and "Close" in data.columns:
-                                for ss in stock_syms:
-                                    try:
-                                        if hasattr(data["Close"], "columns"):
-                                            price = float(data["Close"][ss].dropna().iloc[-1])
-                                        else:
-                                            price = float(data["Close"].dropna().iloc[-1])
-                                        if price > 0:
-                                            STATE["current_prices"][ss] = price
-                                    except: pass
-                        log.info("Batch price update: %d symbols", len(stock_syms))
+                        import yfinance as yf3
+                        tk = yf3.Ticker(ss)
+                        # Try fast_info first (fastest)
+                        try:
+                            price = float(tk.fast_info["last_price"])
+                        except:
+                            # Fallback to history
+                            hist = tk.history(period="1d", interval="1m")
+                            if not hist.empty:
+                                price = float(hist["Close"].iloc[-1])
+                            else:
+                                continue
+                        if price > 0:
+                            STATE["current_prices"][ss] = price
                     except Exception as ex:
-                        log.error("Batch price update error: %s", ex)
-                        time.sleep(60)  # Back off if rate limited
+                        log.error("Stock price %s: %s", ss, ex)
 
         except Exception as ex:
             log.error("Price updater error: %s", ex)
 
-        time.sleep(30)  # Update every 30 seconds - respects Yahoo rate limits
+        time.sleep(1)  # Update every 1 second
 
 
 def run_dashboard():
