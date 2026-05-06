@@ -27,6 +27,111 @@ PERF_FILE     = BASE_DIR + "/performance.json"
 BOT_LOG       = BASE_DIR + "/bot.log"
 PORT          = int(os.getenv("PORT", 8888))
 os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(BASE_DIR, exist_ok=True)
+
+# ─────────────────────────────────────────────────────────────
+#  MARKET HOURS & SESSION AWARENESS
+# ─────────────────────────────────────────────────────────────
+from datetime import timezone
+import pytz
+
+def get_market_status():
+    """Returns which markets are currently open and active trading sessions."""
+    now_utc = datetime.now(timezone.utc)
+    now_et  = now_utc.astimezone(pytz.timezone("America/New_York"))
+    now_lon = now_utc.astimezone(pytz.timezone("Europe/London"))
+    now_tok = now_utc.astimezone(pytz.timezone("Asia/Tokyo"))
+
+    weekday = now_et.weekday()  # 0=Mon, 6=Sun
+    et_hour = now_et.hour + now_et.minute/60
+    lon_hour= now_lon.hour + now_lon.minute/60
+    tok_hour= now_tok.hour + now_tok.minute/60
+
+    status = {
+        "crypto":    True,   # 24/7
+        "forex":     False,
+        "stocks":    False,
+        "etf":       False,
+        "futures":   False,
+        "sessions":  [],
+        "note":      ""
+    }
+
+    # Forex & Futures closed on weekends
+    if weekday >= 5:  # Saturday=5, Sunday=6
+        status["note"] = "Weekend - only crypto trading"
+        return status
+
+    # ── Forex sessions ──────────────────────────────────────────
+    # Sydney:  Sun 5pm ET - Fri 5pm ET (always open on weekdays)
+    # Tokyo:   7pm-4am ET
+    # London:  3am-12pm ET
+    # New York:8am-5pm ET
+    sessions = []
+    if 19 <= et_hour or et_hour < 4:
+        sessions.append("Tokyo")
+    if 3 <= et_hour < 12:
+        sessions.append("London")
+    if 8 <= et_hour < 17:
+        sessions.append("New York")
+    if 8 <= et_hour < 12:
+        sessions.append("London+NY Overlap (highest volume)")
+
+    # Forex open Mon-Fri (closed Fri 5pm ET to Sun 5pm ET)
+    if weekday < 5:
+        if not (weekday == 4 and et_hour >= 17):  # not Fri after 5pm
+            status["forex"] = True
+            status["sessions"] = sessions
+
+    # ── US Stock Market ──────────────────────────────────────────
+    # Regular hours: Mon-Fri 9:30am-4:00pm ET
+    # Pre-market:    Mon-Fri 4:00am-9:30am ET (reduced)
+    # After-hours:   Mon-Fri 4:00pm-8:00pm ET (reduced)
+    if weekday < 5:
+        if 9.5 <= et_hour < 16:
+            status["stocks"] = True
+            status["etf"]    = True
+            status["note"]   = "Regular market hours"
+        elif 4 <= et_hour < 9.5:
+            status["note"] = "Pre-market (limited liquidity)"
+            # Don't trade stocks in pre-market
+        elif 16 <= et_hour < 20:
+            status["note"] = "After-hours (limited liquidity)"
+            # Don't trade stocks after-hours
+
+    # ── Futures ──────────────────────────────────────────────────
+    # CME Futures: Sun 6pm ET - Fri 5pm ET (nearly 24h)
+    # Daily break: 4:00pm-5:00pm ET
+    if weekday < 5:
+        if not (16 <= et_hour < 17):  # not during daily break
+            status["futures"] = True
+    elif weekday == 6 and et_hour >= 18:  # Sunday after 6pm
+        status["futures"] = True
+
+    if not status["sessions"]:
+        status["sessions"] = ["Off-hours (low volume)"]
+
+    status["note"] = (
+        "ET: %02d:%02d | Sessions: %s" % (
+            now_et.hour, now_et.minute,
+            ", ".join(status["sessions"]) if status["sessions"] else "None"
+        )
+    )
+
+    return status
+
+def should_trade(market):
+    """Returns True if this market is currently open for trading."""
+    ms = get_market_status()
+    market = market.upper()
+    if market == "CRYPTO":  return ms["crypto"]
+    if market == "FOREX":   return ms["forex"]
+    if market == "STOCK":   return ms["stocks"]
+    if market == "ETF":     return ms["etf"]
+    if market == "FUTURES": return ms["futures"]
+    return False
+
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -809,6 +914,32 @@ def build_html():
         spr += "<td style='color:%s;font-weight:500'>$%.2f</td>" % (gc(p2), p2)
         spr += "</tr>"
 
+    # Market hours status banner
+    ms_now    = get_market_status()
+    open_mkts = []
+    if ms_now["crypto"]:  open_mkts.append("CRYPTO 24/7")
+    if ms_now["stocks"]:  open_mkts.append("STOCKS")
+    if ms_now["etf"]:     open_mkts.append("ETFs")
+    if ms_now["futures"]: open_mkts.append("FUTURES")
+    if ms_now["forex"]:   open_mkts.append("FOREX")
+    sessions_str = ", ".join(ms_now["sessions"]) if ms_now["sessions"] else "None"
+    mkt_color  = "#0d2d1a" if open_mkts else "#2d1a0d"
+    mkt_border = "#1D9E75" if open_mkts else "#f0a500"
+    mkt_text   = "#2ecc71" if open_mkts else "#f0a500"
+    mkt_banner = (
+        "<div style='background:%s;border:0.5px solid %s;border-radius:8px;"
+        "padding:10px 14px;font-size:12px;color:%s;margin-bottom:12px'>"
+        "<b>Markets Open:</b> %s &nbsp;&nbsp; "
+        "<b>Sessions:</b> %s &nbsp;&nbsp; "
+        "<b>Time:</b> %s"
+        "</div>" % (
+            mkt_color, mkt_border, mkt_text,
+            ", ".join(open_mkts) if open_mkts else "None (Weekend)",
+            sessions_str,
+            ms_now["note"].split("|")[0].strip() if "|" in ms_now["note"] else ms_now["note"]
+        )
+    )
+
     scan_banner = ""
     if s.get("scanning"):
         scan_banner = ("<div style='background:#1a1a00;border:0.5px solid #3a3a00;"
@@ -864,6 +995,7 @@ tr:hover td{background:#131313}
     H.append("<p class='sub'>Refreshes every 15s &nbsp;&middot;&nbsp; "
              "Last scan: %s &nbsp;&middot;&nbsp; Scan #%d &nbsp;&middot;&nbsp; Paper trading only</p>" % (
                  s.get("last_scan", "—"), s.get("scan_count", 0)))
+    H.append(mkt_banner)
     H.append(scan_banner)
 
     # account overview
@@ -1098,9 +1230,16 @@ def run():
             with lock:
                 sym2   = r["symbol"]
                 score2 = float(r.get("score", 6))
+                mkt2   = r.get("market", "STOCK")
 
                 # Skip if already in position
                 if sym2 in tracker.pos:
+                    return
+
+                # Check market hours - don't trade closed markets
+                if not should_trade(mkt2):
+                    ms = get_market_status()
+                    log.info("SKIP %s - %s market closed (%s)", sym2, mkt2, ms["note"])
                     return
 
                 # Get fresh cash
@@ -1187,6 +1326,12 @@ def run():
                 STATE["cash"] = c2
                 STATE["invested"] = i2
 
+        ms = get_market_status()
+        log.info("Market status: %s", ms["note"])
+        log.info("Open: crypto=%s forex=%s stocks=%s futures=%s",
+                 ms["crypto"], ms["forex"], ms["stocks"], ms["futures"])
+
+        print("  Market status: %s" % ms["note"])
         print("  Scanning %d crypto..." % len(CRYPTO))
         for sym in CRYPTO:
             df = get_crypto(exch, sym)
@@ -1201,59 +1346,71 @@ def run():
 
         threading.Thread(target=live_exit_check, daemon=True).start()
 
-        print("  Scanning %d stocks..." % len(STOCKS))
-        for i, sym in enumerate(STOCKS):
-            df, info, heads = get_yf(sym)
-            sent = get_sentiment(sym)
-            earn = get_earnings(sym)
-            r    = analyze(sym, "STOCK", df, learner.w, cash, sent, earn, heads, info)
-            if r:
-                with lock:
-                    prices[sym] = r["price"]
-                    res.append(r)
-                if r["signal"] in ("STRONG BUY", "BUY"):
-                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
-            if i % 5 == 0:
-                threading.Thread(target=live_exit_check, daemon=True).start()
-            time.sleep(13)
+        if ms["stocks"]:
+            print("  Scanning %d stocks (market OPEN)..." % len(STOCKS))
+            for i, sym in enumerate(STOCKS):
+                df, info, heads = get_yf(sym)
+                sent = get_sentiment(sym)
+                earn = get_earnings(sym)
+                r    = analyze(sym, "STOCK", df, learner.w, cash, sent, earn, heads, info)
+                if r:
+                    with lock:
+                        prices[sym] = r["price"]
+                        res.append(r)
+                    if r["signal"] in ("STRONG BUY", "BUY"):
+                        threading.Thread(target=try_open, args=(r,), daemon=True).start()
+                if i % 5 == 0:
+                    threading.Thread(target=live_exit_check, daemon=True).start()
+                time.sleep(13)
+        else:
+            print("  SKIPPING stocks - US market CLOSED. Next open: Mon-Fri 9:30am ET")
 
         threading.Thread(target=live_exit_check, daemon=True).start()
 
-        print("  Scanning %d ETFs..." % len(ETFS))
-        for sym in ETFS:
-            df, info, heads = get_yf(sym)
-            r = analyze(sym, "ETF", df, learner.w, cash, 0.0, None, heads, info)
-            if r:
-                with lock:
-                    prices[sym] = r["price"]
-                    res.append(r)
-                if r["signal"] in ("STRONG BUY", "BUY"):
-                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
-            time.sleep(3)
+        if ms["etf"]:
+            print("  Scanning %d ETFs (market OPEN)..." % len(ETFS))
+            for sym in ETFS:
+                df, info, heads = get_yf(sym)
+                r = analyze(sym, "ETF", df, learner.w, cash, 0.0, None, heads, info)
+                if r:
+                    with lock:
+                        prices[sym] = r["price"]
+                        res.append(r)
+                    if r["signal"] in ("STRONG BUY", "BUY"):
+                        threading.Thread(target=try_open, args=(r,), daemon=True).start()
+                time.sleep(3)
+        else:
+            print("  SKIPPING ETFs - market CLOSED")
 
-        print("  Scanning %d futures..." % len(FUTURES))
-        for sym in FUTURES:
-            df, info, heads = get_yf(sym)
-            r = analyze(sym, "FUTURES", df, learner.w, cash, 0.0, None, heads, info)
-            if r:
-                with lock:
-                    prices[sym] = r["price"]
-                    res.append(r)
-                if r["signal"] in ("STRONG BUY", "BUY"):
-                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
-            time.sleep(3)
+        if ms["futures"]:
+            print("  Scanning %d futures (market OPEN)..." % len(FUTURES))
+            for sym in FUTURES:
+                df, info, heads = get_yf(sym)
+                r = analyze(sym, "FUTURES", df, learner.w, cash, 0.0, None, heads, info)
+                if r:
+                    with lock:
+                        prices[sym] = r["price"]
+                        res.append(r)
+                    if r["signal"] in ("STRONG BUY", "BUY"):
+                        threading.Thread(target=try_open, args=(r,), daemon=True).start()
+                time.sleep(3)
+        else:
+            print("  SKIPPING futures - CME closed (daily break or weekend)")
 
-        print("  Scanning %d forex..." % len(FOREX))
-        for sym in FOREX:
-            df, info, _ = get_yf(sym, period="6mo")
-            r = analyze(sym, "FOREX", df, learner.w, cash)
-            if r:
-                with lock:
-                    prices[sym] = r["price"]
-                    res.append(r)
-                if r["signal"] in ("STRONG BUY", "BUY"):
-                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
-            time.sleep(3)
+        if ms["forex"]:
+            print("  Scanning %d forex (%s)..." % (len(FOREX), ", ".join(ms["sessions"][:2])))
+            for sym in FOREX:
+                df, info, _ = get_yf(sym, period="6mo")
+                r = analyze(sym, "FOREX", df, learner.w, cash)
+                if r:
+                    with lock:
+                        prices[sym] = r["price"]
+                        res.append(r)
+                    if r["signal"] in ("STRONG BUY", "BUY"):
+                        threading.Thread(target=try_open, args=(r,), daemon=True).start()
+                time.sleep(3)
+        else:
+            print("  SKIPPING forex - all sessions closed (weekend)")
 
         threading.Thread(target=live_exit_check, daemon=True).start()
         time.sleep(2)  # let final threads complete

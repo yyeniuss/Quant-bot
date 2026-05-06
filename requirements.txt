@@ -4,3 +4,4 @@ requests
 ccxt
 yfinance
 python-dotenv
+pytz
