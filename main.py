@@ -410,16 +410,28 @@ def pick_style(vol_pct, m5):
     return "SWING"
 
 
-def calc_size(entry, stop, cash):
+def calc_size(entry, stop, cash, score=6.0):
     r = abs(entry - stop)
     if r == 0:
         return 0, 0, 0
-    sh   = int((ACCOUNT_SIZE * MAX_RISK_PCT) / r)
+    # Scale position size by signal strength
+    if score >= 9:    pct = 0.08
+    elif score >= 7.5: pct = 0.06
+    elif score >= 6:   pct = 0.04
+    else:              pct = 0.025
+    # Hard cap at 10% of initial equity
+    max_cost = min(ACCOUNT_SIZE * pct, ACCOUNT_SIZE * 0.10)
+    sh   = int(max_cost / max(entry, 0.0001))
     cost = round(sh * entry, 2)
+    # Never exceed available cash either
     if cost > cash:
-        sh   = int(cash / entry)
+        sh   = int(cash * 0.95 / max(entry, 0.0001))
         cost = round(sh * entry, 2)
-    return sh, cost, round(cost / ACCOUNT_SIZE * 100, 1)
+    # Final hard cap check
+    if cost > ACCOUNT_SIZE * 0.10:
+        sh   = int(ACCOUNT_SIZE * 0.10 / max(entry, 0.0001))
+        cost = round(sh * entry, 2)
+    return max(sh, 0), max(cost, 0), round(cost / ACCOUNT_SIZE * 100, 1)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -668,10 +680,10 @@ def build_html():
             tg1  = float(t.get("target1", 0) or 0)
             tg2  = float(t.get("target2", 0) or 0)
             sh   = float(t.get("shares",  0) or 0)
-            cap  = float(t.get("capital", 0) or 0)
+            cap  = float(t.get("capital", 0) or t.get("cost", 0) or 0)
             risk = round((e - stp) * sh, 2) if 0 < (e - stp) < e * 0.5 else round(cap * 0.025, 2)
             rr   = round((tg1 - e) / (e - stp), 1) if (e - stp) > 0 else 0
-            capp = round(cap / ACCOUNT_SIZE * 100, 1)
+            capp = round(cap / ACCOUNT_SIZE * 100, 1) if cap > 0 else round((sh * e) / ACCOUNT_SIZE * 100, 1)
             pr += "<tr>"
             # Live P&L calculation
             cur_prices = s.get("current_prices", {})
@@ -1001,38 +1013,6 @@ class DashHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode())
 
 
-def update_prices_live():
-    import yfinance as yf2
-    import ccxt as ccxt2
-    exch2 = ccxt2.binance({"enableRateLimit": True})
-    while True:
-        try:
-            if STATE["positions"]:
-                syms = list(STATE["positions"].keys())
-                # Update crypto prices
-                crypto_syms = [s for s in syms if "/" in s]
-                for cs in crypto_syms:
-                    try:
-                        ticker = exch2.fetch_ticker(cs)
-                        STATE["current_prices"][cs] = float(ticker["last"])
-                    except: pass
-                # Update stock prices
-                stock_syms = [s for s in syms if "/" not in s]
-                if stock_syms:
-                    tickers_str = " ".join(stock_syms)
-                    data = yf2.download(tickers_str, period="1d", interval="1m",
-                                        progress=False, auto_adjust=True)
-                    for sym2 in stock_syms:
-                        try:
-                            if len(stock_syms) == 1:
-                                price = float(data["Close"].dropna().iloc[-1])
-                            else:
-                                price = float(data["Close"][sym2].dropna().iloc[-1])
-                            STATE["current_prices"][sym2] = price
-                        except: pass
-        except: pass
-        time.sleep(10)
-
 def run_dashboard():
     HTTPServer(("0.0.0.0", PORT), DashHandler).serve_forever()
 
@@ -1048,7 +1028,6 @@ def run():
     exch    = ccxt.binance({"enableRateLimit": True})
 
     threading.Thread(target=run_dashboard, daemon=True).start()
-    threading.Thread(target=update_prices_live, daemon=True).start()
     tlog.sync()
     STATE["weights"] = learner.w
 
@@ -1080,41 +1059,79 @@ def run():
 
         def try_open(r):
             with lock:
-                sym2 = r["symbol"]
+                sym2   = r["symbol"]
+                score2 = float(r.get("score", 6))
+
+                # Skip if already in position
                 if sym2 in tracker.pos:
                     return
-                cash2, _ = tlog.cash_invested()
-                if cash2 < 50:
-                    # No cash -- replace weakest position if new signal is stronger
+
+                # Get fresh cash
+                cash2, invested2 = tlog.cash_invested()
+
+                # HARD CAP: max 10% of initial equity per position
+                max_per_trade = ACCOUNT_SIZE * 0.10  # $5,000 on $50K
+
+                # Scale size by signal strength (never exceeds max_per_trade)
+                if score2 >= 9:
+                    pct = 0.08
+                elif score2 >= 7.5:
+                    pct = 0.06
+                elif score2 >= 6:
+                    pct = 0.04
+                else:
+                    pct = 0.025
+
+                target_spend = min(ACCOUNT_SIZE * pct, max_per_trade)
+
+                if cash2 < target_spend:
+                    # Not enough cash -- try replacing a weaker position
                     if tracker.pos:
                         weakest = min(tracker.pos.keys(),
                                       key=lambda s: float(tracker.pos[s].get("score", 0)))
                         w_score = float(tracker.pos[weakest].get("score", 0))
-                        if r["score"] > w_score + 1.5:
+                        if score2 > w_score + 1.5:
                             cur_w = prices.get(weakest, 0)
                             if cur_w:
                                 pnl2 = tlog.close(weakest, cur_w)
-                                learner.update(weakest, tracker.pos[weakest].get("factors", []), pnl2)
+                                learner.update(weakest,
+                                               tracker.pos[weakest].get("factors",[]), pnl2)
                                 del tracker.pos[weakest]
                                 STATE["positions"] = tracker.pos
-                                log.info("REPLACED %s(%.1f) with %s(%.1f) PnL=$%.2f",
-                                         weakest, w_score, sym2, r["score"], pnl2)
+                                log.info("REPLACED %s(%.1f) -> %s(%.1f) PnL=$%.2f",
+                                         weakest, w_score, sym2, score2, pnl2)
                                 cash2, _ = tlog.cash_invested()
                             else:
                                 return
                         else:
                             return
+                    else:
+                        return
+
+                # Final size calculation with hard caps
                 entry2    = max(float(r.get("entry", 1)), 0.0001)
-                max_spend = min(cash2 * 0.95, ACCOUNT_SIZE * 0.10)
-                shares2   = max(1, int(max_spend / entry2))
+                spend     = min(target_spend, cash2 * 0.95, max_per_trade)
+                shares2   = max(1, int(spend / entry2))
                 cost2     = round(shares2 * entry2, 2)
+
+                # Triple-check the hard cap
+                if cost2 > max_per_trade:
+                    shares2 = int(max_per_trade / entry2)
+                    cost2   = round(shares2 * entry2, 2)
+
+                if cost2 <= 0 or shares2 <= 0:
+                    return
+
                 r["shares"] = shares2
                 r["cost"]   = cost2
                 r["alloc"]  = round(cost2 / ACCOUNT_SIZE * 100, 1)
-                if cost2 > 0:
-                    tracker.open(r, cash2)
+
+                log.info("OPENING %s score=%.1f pct=%.0f%% shares=%d cost=$%.2f maxallowed=$%.2f",
+                         sym2, score2, pct*100, shares2, cost2, max_per_trade)
+
+                if tracker.open(r, cash2):
                     c3, i3 = tlog.cash_invested()
-                    STATE["cash"] = c3
+                    STATE["cash"]     = c3
                     STATE["invested"] = i3
 
         def live_exit_check():
