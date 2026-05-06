@@ -1007,7 +1007,7 @@ tr:hover td{background:#131313}
     H = []
     H.append("<!DOCTYPE html><html><head>")
     H.append("<title>AI Quant Trader</title>")
-    H.append('<meta http-equiv="refresh" content="15">')
+    H.append('<meta http-equiv="refresh" content="5">')
     H.append("<style>%s</style></head><body>" % CSS)
     H.append("<h1>AI Quant Trader</h1>")
     H.append("<p class='sub'>Refreshes every 15s &nbsp;&middot;&nbsp; "
@@ -1184,9 +1184,10 @@ class DashHandler(BaseHTTPRequestHandler):
 
 
 def update_prices_live():
+    """Updates prices for all open positions every 5 seconds."""
     import ccxt as ccxt2
     exch2 = ccxt2.binance({"enableRateLimit": True})
-    log.info("Live price updater started - 10s refresh")
+    log.info("Live price updater started - 5s refresh")
     while True:
         try:
             pos_now = dict(STATE.get("positions", {}))
@@ -1194,19 +1195,42 @@ def update_prices_live():
                 syms        = list(pos_now.keys())
                 crypto_syms = [x for x in syms if "/" in x]
                 stock_syms  = [x for x in syms if "/" not in x]
+
+                # Crypto via Binance websocket-style polling
                 for cs in crypto_syms:
                     try:
-                        t3 = exch2.fetch_ticker(cs)
-                        STATE["current_prices"][cs] = float(t3["last"])
-                    except: pass
+                        ticker = exch2.fetch_ticker(cs)
+                        price  = float(ticker["last"])
+                        if price > 0:
+                            STATE["current_prices"][cs] = price
+                    except Exception as ex:
+                        log.error("Crypto price %s: %s", cs, ex)
+
+                # Stocks/Forex/Futures via yfinance fast_info
                 for ss in stock_syms:
                     try:
                         import yfinance as yf3
-                        fi = yf3.Ticker(ss).fast_info
-                        STATE["current_prices"][ss] = float(fi["last_price"])
-                    except: pass
-        except: pass
-        time.sleep(10)
+                        tk = yf3.Ticker(ss)
+                        # Try fast_info first (fastest)
+                        try:
+                            price = float(tk.fast_info["last_price"])
+                        except:
+                            # Fallback to history
+                            hist = tk.history(period="1d", interval="1m")
+                            if not hist.empty:
+                                price = float(hist["Close"].iloc[-1])
+                            else:
+                                continue
+                        if price > 0:
+                            STATE["current_prices"][ss] = price
+                    except Exception as ex:
+                        log.error("Stock price %s: %s", ss, ex)
+
+        except Exception as ex:
+            log.error("Price updater error: %s", ex)
+
+        time.sleep(5)  # Update every 5 seconds
+
 
 def run_dashboard():
     HTTPServer(("0.0.0.0", PORT), DashHandler).serve_forever()
