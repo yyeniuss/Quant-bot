@@ -1205,7 +1205,7 @@ def update_prices_live():
         except Exception as ex:
             log.error("Price updater error: %s", ex)
 
-        time.sleep(1)  # Update every 1 second
+        time.sleep(60)
 
 
 def run_dashboard():
