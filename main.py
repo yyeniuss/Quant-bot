@@ -669,24 +669,25 @@ def build_html():
             tg2  = float(t.get("target2", 0) or 0)
             sh   = float(t.get("shares",  0) or 0)
             cap  = float(t.get("capital", 0) or 0)
-            risk = round((e - stp) * sh, 2)
+            risk = round((e - stp) * sh, 2) if 0 < (e - stp) < e * 0.5 else round(cap * 0.025, 2)
             rr   = round((tg1 - e) / (e - stp), 1) if (e - stp) > 0 else 0
             capp = round(cap / ACCOUNT_SIZE * 100, 1)
             pr += "<tr>"
             # Live P&L calculation
             cur_prices = s.get("current_prices", {})
-            cur_price  = cur_prices.get(sym, 0)
-            if cur_price and sh > 0:
+            cur_price  = float(cur_prices.get(sym, 0) or 0)
+            if cur_price > 0 and e > 0 and sh > 0 and sh < 100000:
                 live_pnl     = round((cur_price - e) * sh, 2)
-                live_pnl_pct = round((cur_price - e) / e * 100, 2) if e > 0 else 0
-                pnl_col  = "#1D9E75" if live_pnl >= 0 else "#E24B4A"
-                pnl_str  = "$%+.2f" % live_pnl
-                pnl_p_str= "%+.2f%%" % live_pnl_pct
+                live_pnl_pct = round((cur_price - e) / e * 100, 2)
+                pnl_col   = "#1D9E75" if live_pnl >= 0 else "#E24B4A"
+                pnl_str   = "$%+.2f" % live_pnl
+                pnl_p_str = "%+.2f%%" % live_pnl_pct
             else:
-                pnl_col   = "#888"
-                pnl_str   = "—"
-                pnl_p_str = "—"
                 cur_price = e
+                live_pnl  = 0.0
+                pnl_col   = "#555"
+                pnl_str   = "pending"
+                pnl_p_str = "next scan"
             pr += "<td><b style='color:#fff'>%s</b></td>" % sym
             pr += "<td>%s</td>" % badge(str(t.get("market", "")))
             pr += "<td style='color:#1D9E75;font-weight:500'>OPEN</td>"
@@ -1042,55 +1043,96 @@ def run():
 
         res    = []
         prices = {}
+        lock   = threading.Lock()
+
+        def try_open(r):
+            with lock:
+                sym2 = r["symbol"]
+                if sym2 in tracker.pos:
+                    return
+                cash2, _ = tlog.cash_invested()
+                if cash2 < 50:
+                    # No cash -- replace weakest position if new signal is stronger
+                    if tracker.pos:
+                        weakest = min(tracker.pos.keys(),
+                                      key=lambda s: float(tracker.pos[s].get("score", 0)))
+                        w_score = float(tracker.pos[weakest].get("score", 0))
+                        if r["score"] > w_score + 1.5:
+                            cur_w = prices.get(weakest, 0)
+                            if cur_w:
+                                pnl2 = tlog.close(weakest, cur_w)
+                                learner.update(weakest, tracker.pos[weakest].get("factors", []), pnl2)
+                                del tracker.pos[weakest]
+                                STATE["positions"] = tracker.pos
+                                log.info("REPLACED %s(%.1f) with %s(%.1f) PnL=$%.2f",
+                                         weakest, w_score, sym2, r["score"], pnl2)
+                                cash2, _ = tlog.cash_invested()
+                            else:
+                                return
+                        else:
+                            return
+                entry2    = max(float(r.get("entry", 1)), 0.0001)
+                max_spend = min(cash2 * 0.95, ACCOUNT_SIZE * 0.10)
+                shares2   = max(1, int(max_spend / entry2))
+                cost2     = round(shares2 * entry2, 2)
+                r["shares"] = shares2
+                r["cost"]   = cost2
+                r["alloc"]  = round(cost2 / ACCOUNT_SIZE * 100, 1)
+                if cost2 > 0:
+                    tracker.open(r, cash2)
+                    c3, i3 = tlog.cash_invested()
+                    STATE["cash"] = c3
+                    STATE["invested"] = i3
+
+        def live_exit_check():
+            with lock:
+                tracker.check_exits(prices, learner)
+                c2, i2 = tlog.cash_invested()
+                STATE["cash"] = c2
+                STATE["invested"] = i2
 
         print("  Scanning %d crypto..." % len(CRYPTO))
         for sym in CRYPTO:
             df = get_crypto(exch, sym)
             r  = analyze(sym, "CRYPTO", df, learner.w, cash)
             if r:
-                prices[sym] = r["price"]
-                res.append(r)
-                if r["signal"] in ("STRONG BUY", "BUY") and r["symbol"] not in tracker.pos:
-                    cash, _ = tlog.cash_invested()
-                    entry = max(float(r.get("entry", 1)), 0.0001)
-                    max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
-                    r["shares"] = max(1, int(max_spend / entry))
-                    r["cost"]   = round(r["shares"] * entry, 2)
-                    r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
-                    if r["cost"] > 0 and cash > 100:
-                        tracker.open(r, cash)
-                        cash, _ = tlog.cash_invested()
+                with lock:
+                    prices[sym] = r["price"]
+                    res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY"):
+                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
             time.sleep(1)
 
+        threading.Thread(target=live_exit_check, daemon=True).start()
+
         print("  Scanning %d stocks..." % len(STOCKS))
-        for sym in STOCKS:
+        for i, sym in enumerate(STOCKS):
             df, info, heads = get_yf(sym)
             sent = get_sentiment(sym)
             earn = get_earnings(sym)
             r    = analyze(sym, "STOCK", df, learner.w, cash, sent, earn, heads, info)
             if r:
-                prices[sym] = r["price"]
-                res.append(r)
-                # Open trade immediately if strong signal
-                if r["signal"] in ("STRONG BUY", "BUY") and r["symbol"] not in tracker.pos:
-                    cash, _ = tlog.cash_invested()
-                    entry = max(float(r.get("entry", 1)), 0.0001)
-                    max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
-                    r["shares"] = max(1, int(max_spend / entry))
-                    r["cost"]   = round(r["shares"] * entry, 2)
-                    r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
-                    if r["cost"] > 0 and cash > 100:
-                        tracker.open(r, cash)
-                        cash, _ = tlog.cash_invested()
+                with lock:
+                    prices[sym] = r["price"]
+                    res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY"):
+                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
+            if i % 5 == 0:
+                threading.Thread(target=live_exit_check, daemon=True).start()
             time.sleep(13)
+
+        threading.Thread(target=live_exit_check, daemon=True).start()
 
         print("  Scanning %d ETFs..." % len(ETFS))
         for sym in ETFS:
             df, info, heads = get_yf(sym)
             r = analyze(sym, "ETF", df, learner.w, cash, 0.0, None, heads, info)
             if r:
-                prices[sym] = r["price"]
-                res.append(r)
+                with lock:
+                    prices[sym] = r["price"]
+                    res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY"):
+                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
             time.sleep(3)
 
         print("  Scanning %d futures..." % len(FUTURES))
@@ -1098,8 +1140,11 @@ def run():
             df, info, heads = get_yf(sym)
             r = analyze(sym, "FUTURES", df, learner.w, cash, 0.0, None, heads, info)
             if r:
-                prices[sym] = r["price"]
-                res.append(r)
+                with lock:
+                    prices[sym] = r["price"]
+                    res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY"):
+                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
             time.sleep(3)
 
         print("  Scanning %d forex..." % len(FOREX))
@@ -1107,9 +1152,15 @@ def run():
             df, info, _ = get_yf(sym, period="6mo")
             r = analyze(sym, "FOREX", df, learner.w, cash)
             if r:
-                prices[sym] = r["price"]
-                res.append(r)
+                with lock:
+                    prices[sym] = r["price"]
+                    res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY"):
+                    threading.Thread(target=try_open, args=(r,), daemon=True).start()
             time.sleep(3)
+
+        threading.Thread(target=live_exit_check, daemon=True).start()
+        time.sleep(2)  # let final threads complete
 
         STATE["results"]  = res
         STATE["scanning"] = False
