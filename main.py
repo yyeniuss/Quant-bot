@@ -163,40 +163,16 @@ STOCKS  = [
     "F","GM",
 ]
 ETFS    = [
-    # S&P 500
-    "SPY",   # S&P 500 ETF - tracks all 500 companies
-    "SPXL",  # 3x leveraged S&P 500 bull
-    "SPXS",  # 3x leveraged S&P 500 bear
-    "VOO",   # Vanguard S&P 500
-    "IVV",   # iShares S&P 500
-    # NASDAQ
-    "QQQ",   # NASDAQ 100 ETF
-    "TQQQ",  # 3x leveraged NASDAQ bull
-    "SQQQ",  # 3x leveraged NASDAQ bear
-    "QQQM",  # NASDAQ mini
-    # Small/Mid cap
-    "IWM",   # Russell 2000
-    "TNA",   # 3x Russell bull
-    # Commodities
+    "SPY","SPXL","VOO","IVV",
+    "QQQ","TQQQ","SQQQ","QQQM",
+    "IWM","TNA",
     "GLD","SLV","USO","UNG",
-    # Bonds/Volatility
     "TLT","VXX","UVXY",
-    # Sector ETFs
-    "XLK",   # Technology
-    "XLF",   # Financials
-    "XLE",   # Energy
-    "XLV",   # Healthcare
-    "ARKK",  # ARK Innovation
+    "XLK","XLF","XLE","XLV","ARKK",
 ]
 FUTURES = [
-    "ES=F",   # S&P 500 futures
-    "NQ=F",   # NASDAQ 100 futures
-    "YM=F",   # Dow Jones futures
-    "RTY=F",  # Russell 2000 futures
-    "GC=F",   # Gold futures
-    "CL=F",   # Crude oil futures
-    "SI=F",   # Silver futures
-    "ZB=F",   # 30yr Bond futures
+    "ES=F","NQ=F","YM=F","RTY=F",
+    "GC=F","CL=F","SI=F","ZB=F",
 ]
 FOREX   = ["EURUSD=X","GBPUSD=X","USDJPY=X","AUDUSD=X","USDCAD=X"]
 
@@ -1007,7 +983,7 @@ tr:hover td{background:#131313}
     H = []
     H.append("<!DOCTYPE html><html><head>")
     H.append("<title>AI Quant Trader</title>")
-    H.append('<meta http-equiv="refresh" content="5">')
+    H.append('<meta http-equiv="refresh" content="3">')
     H.append("<style>%s</style></head><body>" % CSS)
     H.append("<h1>AI Quant Trader</h1>")
     H.append("<p class='sub'>Refreshes every 15s &nbsp;&middot;&nbsp; "
@@ -1229,7 +1205,7 @@ def update_prices_live():
         except Exception as ex:
             log.error("Price updater error: %s", ex)
 
-        time.sleep(5)  # Update every 5 seconds
+        time.sleep(1)  # Update every 1 second
 
 
 def run_dashboard():
