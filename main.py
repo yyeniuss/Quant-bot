@@ -698,8 +698,8 @@ def build_html():
                 cur_price = e
                 live_pnl  = 0.0
                 pnl_col   = "#555"
-                pnl_str   = "pending"
-                pnl_p_str = "next scan"
+                pnl_str   = "$0.00"
+                pnl_p_str = "0.00%"
             pr += "<td><b style='color:#fff'>%s</b></td>" % sym
             pr += "<td>%s</td>" % badge(str(t.get("market", "")))
             pr += "<td style='color:#1D9E75;font-weight:500'>OPEN</td>"
@@ -840,6 +840,17 @@ tr:last-child td{border-bottom:none}
 tr:hover td{background:#131313}
 """
 
+    # Compounding equity calculation
+    try:
+        df_dash = pd.read_csv(LOG_FILE)
+        closed_dash = df_dash[df_dash["status"]=="CLOSED"]
+        realized_dash = round(closed_dash["pnl"].astype(float).sum(),2) if len(closed_dash)>0 else 0
+    except:
+        realized_dash = 0
+    true_equity = round(ACCOUNT_SIZE + realized_dash, 2)
+    equity = true_equity
+    pnl    = realized_dash
+    pnl_p  = round(realized_dash / ACCOUNT_SIZE * 100, 2)
     EC  = "#1D9E75" if equity >= ACCOUNT_SIZE else "#E24B4A"
     WRC = "#1D9E75" if st.get("win_rate", 0) >= 50 else "#E24B4A"
     CHC = "#1D9E75" if cash >= ACCOUNT_SIZE * 0.1 else "#E24B4A"
@@ -1013,6 +1024,31 @@ class DashHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode())
 
 
+def update_prices_live():
+    import ccxt as ccxt2
+    exch2 = ccxt2.binance({"enableRateLimit": True})
+    log.info("Live price updater started - 10s refresh")
+    while True:
+        try:
+            pos_now = dict(STATE.get("positions", {}))
+            if pos_now:
+                syms        = list(pos_now.keys())
+                crypto_syms = [x for x in syms if "/" in x]
+                stock_syms  = [x for x in syms if "/" not in x]
+                for cs in crypto_syms:
+                    try:
+                        t3 = exch2.fetch_ticker(cs)
+                        STATE["current_prices"][cs] = float(t3["last"])
+                    except: pass
+                for ss in stock_syms:
+                    try:
+                        import yfinance as yf3
+                        fi = yf3.Ticker(ss).fast_info
+                        STATE["current_prices"][ss] = float(fi["last_price"])
+                    except: pass
+        except: pass
+        time.sleep(10)
+
 def run_dashboard():
     HTTPServer(("0.0.0.0", PORT), DashHandler).serve_forever()
 
@@ -1028,6 +1064,7 @@ def run():
     exch    = ccxt.binance({"enableRateLimit": True})
 
     threading.Thread(target=run_dashboard, daemon=True).start()
+    threading.Thread(target=update_prices_live, daemon=True).start()
     tlog.sync()
     STATE["weights"] = learner.w
 
@@ -1069,8 +1106,17 @@ def run():
                 # Get fresh cash
                 cash2, invested2 = tlog.cash_invested()
 
-                # HARD CAP: max 10% of initial equity per position
-                max_per_trade = ACCOUNT_SIZE * 0.10  # $5,000 on $50K
+                # Compounding equity: base sizing on current real equity
+                try:
+                    df_eq = pd.read_csv(LOG_FILE)
+                    closed_eq = df_eq[df_eq["status"]=="CLOSED"]
+                    realized = closed_eq["pnl"].astype(float).sum() if len(closed_eq)>0 else 0
+                    current_equity = max(ACCOUNT_SIZE + realized, ACCOUNT_SIZE * 0.5)
+                except:
+                    current_equity = ACCOUNT_SIZE
+
+                # HARD CAP: max 10% of current equity per position
+                max_per_trade = current_equity * 0.10
 
                 # Scale size by signal strength (never exceeds max_per_trade)
                 if score2 >= 9:
@@ -1082,7 +1128,7 @@ def run():
                 else:
                     pct = 0.025
 
-                target_spend = min(ACCOUNT_SIZE * pct, max_per_trade)
+                target_spend = min(current_equity * pct, max_per_trade)
 
                 if cash2 < target_spend:
                     # Not enough cash -- try replacing a weaker position
