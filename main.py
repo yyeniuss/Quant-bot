@@ -1050,6 +1050,16 @@ def run():
             if r:
                 prices[sym] = r["price"]
                 res.append(r)
+                if r["signal"] in ("STRONG BUY", "BUY") and r["symbol"] not in tracker.pos:
+                    cash, _ = tlog.cash_invested()
+                    entry = max(float(r.get("entry", 1)), 0.0001)
+                    max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
+                    r["shares"] = max(1, int(max_spend / entry))
+                    r["cost"]   = round(r["shares"] * entry, 2)
+                    r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
+                    if r["cost"] > 0 and cash > 100:
+                        tracker.open(r, cash)
+                        cash, _ = tlog.cash_invested()
             time.sleep(1)
 
         print("  Scanning %d stocks..." % len(STOCKS))
@@ -1061,6 +1071,17 @@ def run():
             if r:
                 prices[sym] = r["price"]
                 res.append(r)
+                # Open trade immediately if strong signal
+                if r["signal"] in ("STRONG BUY", "BUY") and r["symbol"] not in tracker.pos:
+                    cash, _ = tlog.cash_invested()
+                    entry = max(float(r.get("entry", 1)), 0.0001)
+                    max_spend = min(cash * 0.95, ACCOUNT_SIZE * 0.10)
+                    r["shares"] = max(1, int(max_spend / entry))
+                    r["cost"]   = round(r["shares"] * entry, 2)
+                    r["alloc"]  = round(r["cost"] / ACCOUNT_SIZE * 100, 1)
+                    if r["cost"] > 0 and cash > 100:
+                        tracker.open(r, cash)
+                        cash, _ = tlog.cash_invested()
             time.sleep(13)
 
         print("  Scanning %d ETFs..." % len(ETFS))
