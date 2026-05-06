@@ -21,6 +21,8 @@ TAKE_PROFIT_LONG  = 0.15   # long swing target +15%
 STOP_LOSS_PCT     = 0.025  # stop loss -2.5%
 TAKE_PROFIT_1     = 0.05   # alias
 TAKE_PROFIT_2     = 0.08   # alias
+SAFETY_RESERVE    = 0.15   # always keep 15% cash free = $7,500 on $50K
+MAX_TRADE_PCT     = 0.08   # hard max 8% per trade = $4,000 on $50K
 BASE_DIR      = os.path.expanduser("~/trading_bot")
 LOG_FILE      = BASE_DIR + "/trades.csv"
 PERF_FILE     = BASE_DIR + "/performance.json"
@@ -971,17 +973,33 @@ tr:last-child td{border-bottom:none}
 tr:hover td{background:#131313}
 """
 
-    # Compounding equity calculation
+    # Full equity = starting + realized P&L + unrealized P&L
     try:
-        df_dash = pd.read_csv(LOG_FILE)
-        closed_dash = df_dash[df_dash["status"]=="CLOSED"]
+        df_dash    = pd.read_csv(LOG_FILE)
+        closed_dash= df_dash[df_dash["status"]=="CLOSED"]
         realized_dash = round(closed_dash["pnl"].astype(float).sum(),2) if len(closed_dash)>0 else 0
     except:
         realized_dash = 0
-    true_equity = round(ACCOUNT_SIZE + realized_dash, 2)
-    equity = true_equity
-    pnl    = realized_dash
-    pnl_p  = round(realized_dash / ACCOUNT_SIZE * 100, 2)
+
+    # Unrealized P&L from open positions using live prices
+    cur_prices_dash = s.get("current_prices", {})
+    unrealized_dash = 0.0
+    for sym_d, t_d in pos.items():
+        try:
+            e_d   = float(t_d.get("entry", 0) or 0)
+            sh_d  = float(t_d.get("shares", 0) or 0)
+            cp_d  = float(cur_prices_dash.get(sym_d, 0) or 0)
+            if cp_d > 0 and e_d > 0 and sh_d > 0 and sh_d < 100000:
+                unrealized_dash += (cp_d - e_d) * sh_d
+        except: pass
+    unrealized_dash = round(unrealized_dash, 2)
+
+    true_equity  = round(ACCOUNT_SIZE + realized_dash + unrealized_dash, 2)
+    equity       = true_equity
+    pnl          = realized_dash
+    pnl_p        = round(realized_dash / ACCOUNT_SIZE * 100, 2)
+    total_pnl_dash = round(realized_dash + unrealized_dash, 2)
+    total_pnl_pct  = round(total_pnl_dash / ACCOUNT_SIZE * 100, 2)
     EC  = "#1D9E75" if equity >= ACCOUNT_SIZE else "#E24B4A"
     WRC = "#1D9E75" if st.get("win_rate", 0) >= 50 else "#E24B4A"
     CHC = "#1D9E75" if cash >= ACCOUNT_SIZE * 0.1 else "#E24B4A"
@@ -1002,11 +1020,13 @@ tr:hover td{background:#131313}
     H.append("<h2>Account Overview</h2><div class='g4'>")
     H.append("<div class='card hl'><div class='cl'>Starting Capital</div>"
              "<div class='cv'>$%s</div><div class='cv-sub'>Hard limit</div></div>" % "{:,}".format(ACCOUNT_SIZE))
+    safety_amt  = round(ACCOUNT_SIZE * SAFETY_RESERVE, 2)
+    spendable_d = max(round(cash - safety_amt, 2), 0)
     H.append("<div class='card'><div class='cl'>Cash Available</div>"
              "<div class='cv' style='color:%s'>$%.2f</div>"
-             "<div class='cv-sub'>%.1f%% free to deploy</div>"
+             "<div class='cv-sub'>$%.0f reserve locked | $%.2f deployable</div>"
              "<div class='pw'><div class='pb' style='width:%.1f%%;background:#1D9E75'></div></div></div>" % (
-                 CHC, max(cash, 0), cp, max(min(cp, 100), 0)))
+                 CHC, max(cash, 0), safety_amt, spendable_d, max(min(cp, 100), 0)))
     H.append("<div class='card'><div class='cl'>Capital Invested</div>"
              "<div class='cv' style='color:#378ADD'>$%.2f</div>"
              "<div class='cv-sub'>%.1f%% across %d trades</div>"
@@ -1014,8 +1034,15 @@ tr:hover td{background:#131313}
                  inv, ip, len(pos), min(ip, 100)))
     H.append("<div class='card %s'><div class='cl'>Total Equity</div>"
              "<div class='cv' style='color:%s'>$%.2f</div>"
-             "<div class='cv-sub' style='color:%s'>P&amp;L: $%+.2f (%.2f%%)</div></div>" % (
-                 "hl" if equity >= ACCOUNT_SIZE else "dg", EC, equity, gc(pnl), pnl, pnl_p))
+             "<div class='cv-sub' style='color:%s'>Total P&amp;L: $%+.2f (%.2f%%)</div>"
+             "<div style='font-size:10px;color:#444;margin-top:3px'>"
+             "Realized: <span style='color:%s'>$%+.2f</span> &nbsp; "
+             "Unrealized: <span style='color:%s'>$%+.2f</span>"
+             "</div></div>" % (
+                 "hl" if equity >= ACCOUNT_SIZE else "dg", EC, equity,
+                 gc(total_pnl_dash), total_pnl_dash, total_pnl_pct,
+                 gc(realized_dash), realized_dash,
+                 gc(unrealized_dash), unrealized_dash))
     H.append("</div>")
 
     # performance
@@ -1232,92 +1259,97 @@ def run():
                 score2 = float(r.get("score", 6))
                 mkt2   = r.get("market", "STOCK")
 
-                # Skip if already in position
+                # 1. Skip if already in position
                 if sym2 in tracker.pos:
                     return
 
-                # Check market hours - don't trade closed markets
+                # 2. Check market hours
                 if not should_trade(mkt2):
-                    ms = get_market_status()
-                    log.info("SKIP %s - %s market closed (%s)", sym2, mkt2, ms["note"])
+                    ms2 = get_market_status()
+                    log.info("SKIP %s - %s closed | %s", sym2, mkt2, ms2["note"])
                     return
 
-                # Get fresh cash
+                # 3. Get real-time cash and equity
                 cash2, invested2 = tlog.cash_invested()
 
-                # Compounding equity: base sizing on current real equity
+                # 4. Calculate current equity (compounding)
                 try:
-                    df_eq = pd.read_csv(LOG_FILE)
-                    closed_eq = df_eq[df_eq["status"]=="CLOSED"]
-                    realized = closed_eq["pnl"].astype(float).sum() if len(closed_eq)>0 else 0
-                    current_equity = max(ACCOUNT_SIZE + realized, ACCOUNT_SIZE * 0.5)
+                    df_eq2  = pd.read_csv(LOG_FILE)
+                    c_eq2   = df_eq2[df_eq2["status"]=="CLOSED"]
+                    realized2 = float(c_eq2["pnl"].astype(float).sum()) if len(c_eq2)>0 else 0
+                    cur_eq2 = max(ACCOUNT_SIZE + realized2, ACCOUNT_SIZE * 0.5)
                 except:
-                    current_equity = ACCOUNT_SIZE
+                    cur_eq2 = ACCOUNT_SIZE
 
-                # HARD CAP: max 10% of current equity per position
-                max_per_trade = current_equity * 0.10
+                # 5. Safety reserve check - always keep 15% cash free
+                min_cash = cur_eq2 * SAFETY_RESERVE   # e.g. $7,500 on $50K
+                spendable = cash2 - min_cash           # only spend above safety reserve
 
-                # Scale size by signal strength (never exceeds max_per_trade)
-                if score2 >= 9:
-                    pct = 0.08
-                elif score2 >= 7.5:
-                    pct = 0.06
-                elif score2 >= 6:
-                    pct = 0.04
-                else:
-                    pct = 0.025
-
-                target_spend = min(current_equity * pct, max_per_trade)
-
-                if cash2 < target_spend:
-                    # Not enough cash -- try replacing a weaker position
+                if spendable < 100:
+                    # Truly no capital - try position replacement
                     if tracker.pos:
                         weakest = min(tracker.pos.keys(),
                                       key=lambda s: float(tracker.pos[s].get("score", 0)))
                         w_score = float(tracker.pos[weakest].get("score", 0))
-                        if score2 > w_score + 1.5:
+                        if score2 > w_score + 2.0:  # need 2+ point advantage to replace
                             cur_w = prices.get(weakest, 0)
                             if cur_w:
                                 pnl2 = tlog.close(weakest, cur_w)
                                 learner.update(weakest,
-                                               tracker.pos[weakest].get("factors",[]), pnl2)
+                                    tracker.pos[weakest].get("factors",[]), pnl2)
                                 del tracker.pos[weakest]
                                 STATE["positions"] = tracker.pos
                                 log.info("REPLACED %s(%.1f) -> %s(%.1f) PnL=$%.2f",
                                          weakest, w_score, sym2, score2, pnl2)
                                 cash2, _ = tlog.cash_invested()
+                                spendable = cash2 - min_cash
                             else:
                                 return
                         else:
+                            log.info("SKIP %s - safety reserve active ($%.0f free, need $%.0f min)",
+                                     sym2, cash2, min_cash)
                             return
                     else:
                         return
 
-                # Final size calculation with hard caps
+                # 6. Scale position size by signal strength - HARD CAP at 8%
+                if score2 >= 9:
+                    pct = 0.07   # 7% for very strong  = $3,500
+                elif score2 >= 7.5:
+                    pct = 0.05   # 5% for strong       = $2,500
+                elif score2 >= 6:
+                    pct = 0.035  # 3.5% for moderate   = $1,750
+                else:
+                    pct = 0.02   # 2% for weaker        = $1,000
+
+                # Never exceed MAX_TRADE_PCT (8%) of initial equity
+                hard_max  = ACCOUNT_SIZE * MAX_TRADE_PCT   # $4,000
+                target    = min(cur_eq2 * pct, hard_max, spendable * 0.9)
+
                 entry2    = max(float(r.get("entry", 1)), 0.0001)
-                spend     = min(target_spend, cash2 * 0.95, max_per_trade)
-                shares2   = max(1, int(spend / entry2))
+                shares2   = max(1, int(target / entry2))
                 cost2     = round(shares2 * entry2, 2)
 
-                # Triple-check the hard cap
-                if cost2 > max_per_trade:
-                    shares2 = int(max_per_trade / entry2)
+                # Final safety check - never spend more than hard_max
+                if cost2 > hard_max:
+                    shares2 = int(hard_max / entry2)
                     cost2   = round(shares2 * entry2, 2)
 
-                if cost2 <= 0 or shares2 <= 0:
+                if cost2 <= 0 or shares2 <= 0 or cost2 > cash2:
                     return
 
                 r["shares"] = shares2
                 r["cost"]   = cost2
                 r["alloc"]  = round(cost2 / ACCOUNT_SIZE * 100, 1)
 
-                log.info("OPENING %s score=%.1f pct=%.0f%% shares=%d cost=$%.2f maxallowed=$%.2f",
-                         sym2, score2, pct*100, shares2, cost2, max_per_trade)
+                log.info("OPENING %s | score=%.1f | pct=%.1f%% | shares=%d | cost=$%.2f | cash=$%.2f | reserve=$%.2f",
+                         sym2, score2, pct*100, shares2, cost2, cash2, min_cash)
 
                 if tracker.open(r, cash2):
                     c3, i3 = tlog.cash_invested()
                     STATE["cash"]     = c3
                     STATE["invested"] = i3
+
 
         def live_exit_check():
             with lock:
